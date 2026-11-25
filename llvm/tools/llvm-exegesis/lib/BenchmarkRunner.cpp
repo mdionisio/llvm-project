@@ -13,6 +13,7 @@
 #include "MCInstrDescView.h"
 #include "MmapUtils.h"
 #include "PerfHelper.h"
+#include "RemoteExecution.h"
 #include "SubprocessMemory.h"
 #include "Target.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -178,6 +179,32 @@ private:
   const LLVMState &State;
   const ExecutableFunction Function;
   BenchmarkRunner::ScratchSpace *const Scratch;
+};
+
+// Runs the benchmark function on a remote core through a RemoteSession. The
+// generated code stores the cycle counter itself (see readRemoteCycleCounter),
+// so only the cycle counter is available.
+class RemoteFunctionExecutorImpl : public BenchmarkRunner::FunctionExecutor {
+public:
+  RemoteFunctionExecutorImpl(const RemoteSession &Session,
+                             object::OwningBinary<object::ObjectFile> Obj)
+      : Session(Session), Obj(std::move(Obj)) {}
+
+private:
+  Expected<SmallVector<int64_t, 4>> runWithCounter(
+      StringRef CounterName, ArrayRef<const char *> ValidationCounters,
+      SmallVectorImpl<int64_t> &ValidationCounterValues) const override {
+    if (!ValidationCounters.empty())
+      return make_error<Failure>("The remote execution mode does not support "
+                                 "validation counters.");
+    auto Cycles = Session.runOnce(*Obj.getBinary());
+    if (!Cycles)
+      return Cycles.takeError();
+    return SmallVector<int64_t, 4>{*Cycles};
+  }
+
+  const RemoteSession &Session;
+  object::OwningBinary<object::ObjectFile> Obj;
 };
 
 #ifdef __linux__
@@ -687,7 +714,10 @@ Expected<SmallString<0>> BenchmarkRunner::assembleSnippet(
           State.getExegesisTarget(), State.createTargetMachine(), BC.LiveIns,
           Repetitor.Repeat(Instructions, MinInstructions, LoopBodySize,
                            GenerateMemoryInstructions),
-          OS, BC.Key, GenerateMemoryInstructions)) {
+          OS, BC.Key, GenerateMemoryInstructions,
+          RemoteSess
+              ? std::optional<uint64_t>(RemoteSess->getDescription().Results)
+              : std::nullopt)) {
     return std::move(E);
   }
   return Buffer;
@@ -779,6 +809,16 @@ BenchmarkRunner::createFunctionExecutor(
     return make_error<Failure>(
         "The subprocess execution mode is only supported on Linux");
 #endif
+  }
+  case ExecutionModeE::Remote: {
+    if (!RemoteSess)
+      return make_error<Failure>("The remote execution mode needs a remote "
+                                 "session (--remote-helper/--remote-target)");
+    if (BenchmarkProcessCPU.has_value())
+      return make_error<Failure>("The remote execution mode does not "
+                                 "support benchmark core pinning.");
+    return std::make_unique<RemoteFunctionExecutorImpl>(*RemoteSess,
+                                                        std::move(ObjectFile));
   }
   }
   llvm_unreachable("ExecutionMode is outside expected range");

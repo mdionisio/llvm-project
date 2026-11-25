@@ -31,10 +31,12 @@
 namespace llvm {
 namespace exegesis {
 
+class RemoteSession;
+
 // Common code for all benchmark modes.
 class BenchmarkRunner {
 public:
-  enum ExecutionModeE { InProcess, SubProcess };
+  enum ExecutionModeE { InProcess, SubProcess, Remote };
 
   explicit BenchmarkRunner(const LLVMState &State, Benchmark::ModeE Mode,
                            BenchmarkPhaseSelectorE BenchmarkPhaseSelector,
@@ -42,6 +44,9 @@ public:
                            ArrayRef<ValidationEvent> ValCounters);
 
   virtual ~BenchmarkRunner();
+
+  // The session used by the Remote execution mode; must outlive the runner.
+  void setRemoteSession(const RemoteSession *Session) { RemoteSess = Session; }
 
   class RunnableConfiguration {
     friend class BenchmarkRunner;
@@ -133,6 +138,7 @@ private:
                                         StringRef FileName) const;
 
   const std::unique_ptr<ScratchSpace> Scratch;
+  const RemoteSession *RemoteSess = nullptr;
 
   Expected<std::unique_ptr<FunctionExecutor>>
   createFunctionExecutor(object::OwningBinary<object::ObjectFile> Obj,

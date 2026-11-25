@@ -20,6 +20,7 @@
 #include "lib/LlvmState.h"
 #include "lib/PerfHelper.h"
 #include "lib/ProgressMeter.h"
+#include "lib/RemoteExecution.h"
 #include "lib/ResultAggregator.h"
 #include "lib/SnippetFile.h"
 #include "lib/SnippetRepetitor.h"
@@ -253,8 +254,23 @@ static cl::opt<BenchmarkRunner::ExecutionModeE> ExecutionMode(
                clEnumValN(BenchmarkRunner::ExecutionModeE::SubProcess,
                           "subprocess",
                           "Spawns a subprocess for each snippet execution, "
-                          "allows for the use of memory annotations")),
+                          "allows for the use of memory annotations"),
+               clEnumValN(BenchmarkRunner::ExecutionModeE::Remote, "remote",
+                          "Runs the snippets on a bare-metal core through a "
+                          "debugger helper (see --remote-helper)")),
     cl::init(BenchmarkRunner::ExecutionModeE::InProcess));
+
+static cl::opt<std::string> RemoteHelperCommand(
+    "remote-helper",
+    cl::desc("Shell command starting the helper that drives the remote core "
+             "(remote execution mode)"),
+    cl::cat(BenchmarkOptions), cl::init(""));
+
+static cl::opt<std::string> RemoteTargetFile(
+    "remote-target",
+    cl::desc("YAML description of the memory layout of the remote core "
+             "(remote execution mode)"),
+    cl::cat(BenchmarkOptions), cl::init(""));
 
 static cl::opt<unsigned> BenchmarkRepeatCount(
     "benchmark-repeat-count",
@@ -465,8 +481,11 @@ static void runBenchmarkConfigurations(
 }
 
 void benchmarkMain() {
+  const bool IsRemote =
+      ExecutionMode == BenchmarkRunner::ExecutionModeE::Remote;
+  // The remote mode reads its counter from the generated code: no libpfm.
   if (BenchmarkPhaseSelector == BenchmarkPhaseSelectorE::Measure &&
-      !UseDummyPerfCounters) {
+      !UseDummyPerfCounters && !IsRemote) {
 #ifndef HAVE_LIBPFM
     ExitWithError(
         "benchmarking unavailable, LLVM was built without libpfm. You can "
@@ -491,8 +510,25 @@ void benchmarkMain() {
 
   // Preliminary check to ensure features needed for requested
   // benchmark mode are present on target CPU and/or OS.
-  if (BenchmarkPhaseSelector == BenchmarkPhaseSelectorE::Measure)
+  if (BenchmarkPhaseSelector == BenchmarkPhaseSelectorE::Measure && !IsRemote)
     ExitOnErr(State.getExegesisTarget().checkFeatureSupport());
+
+  std::unique_ptr<RemoteSession> Remote;
+  if (IsRemote) {
+    if (BenchmarkMode == Benchmark::Uops)
+      ExitWithError("The remote execution mode only measures cycles: use "
+                    "--mode=latency or --mode=inverse_throughput.");
+    if (RemoteHelperCommand.empty() || RemoteTargetFile.empty())
+      ExitWithError("The remote execution mode needs --remote-helper and "
+                    "--remote-target.");
+    if (BenchmarkPhaseSelector == BenchmarkPhaseSelectorE::Measure)
+      Remote = ExitOnErr(RemoteSession::create(
+          RemoteHelperCommand, RemoteTargetFile, State.getExegesisTarget()));
+    else
+      // Still assemble the counter reads, at the described addresses.
+      Remote = ExitOnErr(RemoteSession::createOffline(
+          RemoteTargetFile, State.getExegesisTarget()));
+  }
 
   if (ExecutionMode == BenchmarkRunner::ExecutionModeE::SubProcess &&
       UseDummyPerfCounters)
@@ -506,6 +542,7 @@ void benchmarkMain() {
   if (!Runner) {
     ExitWithError("cannot create benchmark runner");
   }
+  Runner->setRemoteSession(Remote.get());
 
   const auto Opcodes = getOpcodesOrDie(State);
   std::vector<BenchmarkCode> Configurations;

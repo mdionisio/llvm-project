@@ -8,7 +8,9 @@
 #include "../Target.h"
 #include "AArch64.h"
 #include "AArch64RegisterInfo.h"
+#include "Utils/AArch64BaseInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/MC/MCInstBuilder.h"
 
 #if defined(__aarch64__) && defined(__linux__)
 #include <sys/prctl.h> // For PR_PAC_* constants
@@ -300,11 +302,58 @@ private:
     return Arch == Triple::aarch64 || Arch == Triple::aarch64_be;
   }
 
+  std::optional<RemoteABI> getRemoteABI() const override {
+    // "b ." is 0x14000000.
+    return RemoteABI{"x0", "sp", "x30", 64, {0x00, 0x00, 0x00, 0x14}};
+  }
+
+  std::vector<MCInst> readRemoteCycleCounter(uint64_t Address,
+                                             bool Start) const override;
+
   void addTargetSpecificPasses(PassManagerBase &PM) const override {
     // Function return is a pseudo-instruction that needs to be expanded
     PM.add(createAArch64ExpandPseudoLegacyPass());
   }
 };
+
+static unsigned getSysReg(StringRef Name) {
+  const auto *SR = AArch64SysReg::lookupSysRegByName(Name);
+  assert(SR && "unknown system register");
+  return SR->Encoding;
+}
+
+// Bare-metal at EL1, with PMCCNTR_EL0 as the cycle counter. X16 and X17 are
+// temporaries: the start read runs before the register setup and the end
+// read after the snippet, so the snippet never sees them.
+std::vector<MCInst>
+ExegesisAArch64Target::readRemoteCycleCounter(uint64_t Address,
+                                              bool Start) const {
+  constexpr MCRegister Tmp = AArch64::X16, Addr = AArch64::X17;
+  auto Msr = [](StringRef SysReg, MCRegister Reg) {
+    return MCInstBuilder(AArch64::MSR).addImm(getSysReg(SysReg)).addReg(Reg);
+  };
+  std::vector<MCInst> Insts;
+  if (Start) {
+    // Enable FP/SIMD at EL1 (CPACR_EL1.FPEN = 0b11) and the cycle counter
+    // (PMCR_EL0.E, PMCNTENSET_EL0.C), counting at every exception level.
+    // Cheap enough to repeat before each run.
+    Insts.push_back(loadImmediate(Tmp, 64, APInt(64, 3 << 20)));
+    Insts.push_back(Msr("CPACR_EL1", Tmp));
+    Insts.push_back(loadImmediate(Tmp, 64, APInt(64, 1)));
+    Insts.push_back(Msr("PMCR_EL0", Tmp));
+    Insts.push_back(loadImmediate(Tmp, 64, APInt(64, 1ULL << 31)));
+    Insts.push_back(Msr("PMCNTENSET_EL0", Tmp));
+    Insts.push_back(Msr("PMCCFILTR_EL0", AArch64::XZR));
+  }
+  // isb; mrs Tmp, PMCCNTR_EL0; str Tmp, [Addr]
+  Insts.push_back(MCInstBuilder(AArch64::ISB).addImm(0xf));
+  Insts.push_back(
+      MCInstBuilder(AArch64::MRS).addReg(Tmp).addImm(getSysReg("PMCCNTR_EL0")));
+  Insts.push_back(loadImmediate(Addr, 64, APInt(64, Address)));
+  Insts.push_back(
+      MCInstBuilder(AArch64::STRXui).addReg(Tmp).addReg(Addr).addImm(0));
+  return Insts;
+}
 
 Error ExegesisAArch64Target::randomizeTargetMCOperand(
     const Instruction &Instr, const Variable &Var, MCOperand &AssignedValue,

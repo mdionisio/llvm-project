@@ -201,6 +201,31 @@ public:
                        "current architecture");
   };
 
+  // What the remote execution mode (--execution-mode=remote) needs to know
+  // about the calling convention of the benchmark function.
+  struct RemoteABI {
+    // Register names as the debugger knows them.
+    const char *ArgumentRegister; // receives the scratch memory address
+    const char *StackPointer;
+    const char *LinkRegister; // the function returns to this address
+    // Width in bits of the cycle counter, for wrap-around.
+    unsigned CycleCounterWidth;
+    // Encoding of an instruction that branches to itself: the return pad.
+    std::vector<uint8_t> ReturnPad;
+  };
+
+  // Returns std::nullopt if the target does not support remote execution.
+  virtual std::optional<RemoteABI> getRemoteABI() const { return std::nullopt; }
+
+  // Returns the instructions that store the current cycle counter value, as
+  // 8 bytes, at Address. Start is true for the read before the snippet, which
+  // may also enable the counter. The instructions may clobber any register
+  // but the stack pointer and the argument register.
+  virtual std::vector<MCInst> readRemoteCycleCounter(uint64_t Address,
+                                                     bool Start) const {
+    return {};
+  }
+
   // Returns the register pointing to scratch memory, or 0 if this target
   // does not support memory operands. The benchmark function uses the
   // default calling convention.

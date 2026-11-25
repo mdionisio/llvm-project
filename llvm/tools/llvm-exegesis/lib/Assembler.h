@@ -93,7 +93,8 @@ Error assembleToStream(const ExegesisTarget &ET,
                        std::unique_ptr<TargetMachine> TM,
                        ArrayRef<MCRegister> LiveIns, const FillFunction &Fill,
                        raw_pwrite_stream &AsmStreamm, const BenchmarkKey &Key,
-                       bool GenerateMemoryInstructions);
+                       bool GenerateMemoryInstructions,
+                       std::optional<uint64_t> RemoteResultsAddress = {});
 
 // Creates an ObjectFile in the format understood by the host.
 // Note: the resulting object keeps a copy of Buffer so it can be discarded once

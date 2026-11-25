@@ -76,6 +76,19 @@ private:
   int SignalNumber;
 };
 
+// A class representing a failure of the snippet on a remote core: it did not
+// return to the return pad, or it did not stop in time.
+class SnippetRemoteFailure : public SnippetExecutionFailure {
+public:
+  static char ID;
+  SnippetRemoteFailure(const Twine &S) : Msg(S.str()) {}
+
+  void log(raw_ostream &OS) const override;
+
+private:
+  std::string Msg;
+};
+
 // A class representing a case where a perf counter was only partially
 // scheduled, most likely due to perf counter contention.
 struct PerfCounterNotFullyEnabled

@@ -37,6 +37,10 @@ void SnippetSegmentationFault::log(raw_ostream &OS) const {
      << Twine::utohexstr(Address);
 }
 
+char SnippetRemoteFailure::ID;
+
+void SnippetRemoteFailure::log(raw_ostream &OS) const { OS << Msg; }
+
 char SnippetSignal::ID;
 
 void SnippetSignal::log(raw_ostream &OS) const {

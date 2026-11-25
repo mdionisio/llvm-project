@@ -153,10 +153,14 @@ BasicBlockFiller::BasicBlockFiller(MachineFunction &MF, MachineBasicBlock *MBB,
                                    const MCInstrInfo *MCII)
     : MF(MF), MBB(MBB), MCII(MCII) {}
 
-void BasicBlockFiller::addInstruction(const MCInst &Inst, const DebugLoc &DL) {
+// Converts Inst to a MachineInstr inserted before InsertPt.
+static void insertMCInst(MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator InsertPt,
+                         const MCInstrInfo &MCII, const MCInst &Inst,
+                         const DebugLoc &DL) {
   const unsigned Opcode = Inst.getOpcode();
-  const MCInstrDesc &MCID = MCII->get(Opcode);
-  MachineInstrBuilder Builder = BuildMI(MBB, DL, MCID);
+  const MCInstrDesc &MCID = MCII.get(Opcode);
+  MachineInstrBuilder Builder = BuildMI(MBB, InsertPt, DL, MCID);
   for (unsigned OpIndex = 0, E = Inst.getNumOperands(); OpIndex < E;
        ++OpIndex) {
     const MCOperand &Op = Inst.getOperand(OpIndex);
@@ -175,6 +179,10 @@ void BasicBlockFiller::addInstruction(const MCInst &Inst, const DebugLoc &DL) {
       llvm_unreachable("Not yet implemented");
     }
   }
+}
+
+void BasicBlockFiller::addInstruction(const MCInst &Inst, const DebugLoc &DL) {
+  insertMCInst(*MBB, MBB->end(), *MCII, Inst, DL);
 }
 
 void BasicBlockFiller::addInstructions(ArrayRef<MCInst> Insts,
@@ -254,7 +262,8 @@ Error assembleToStream(const ExegesisTarget &ET,
                        std::unique_ptr<TargetMachine> TM,
                        ArrayRef<MCRegister> LiveIns, const FillFunction &Fill,
                        raw_pwrite_stream &AsmStream, const BenchmarkKey &Key,
-                       bool GenerateMemoryInstructions) {
+                       bool GenerateMemoryInstructions,
+                       std::optional<uint64_t> RemoteResultsAddress) {
   auto Context = std::make_unique<LLVMContext>();
   std::unique_ptr<Module> Module = createModule(Context, *TM);
   auto MMIWP = std::make_unique<MachineModuleInfoWrapperPass>(TM.get());
@@ -299,6 +308,13 @@ Error assembleToStream(const ExegesisTarget &ET,
       Entry.MBB->addLiveIn(Reg);
   }
 
+  // Remote execution: read the cycle counter before setting up the registers,
+  // so that its temporaries do not clobber the initial values. The setup cost
+  // is constant and cancels out in the middle-half repetition modes.
+  if (RemoteResultsAddress)
+    Entry.addInstructions(
+        ET.readRemoteCycleCounter(*RemoteResultsAddress, /*Start=*/true));
+
   const bool IsSnippetSetupComplete = generateSnippetSetupCode(
       ET, &TM->getMCSubtargetInfo(), Entry, Key, GenerateMemoryInstructions);
 
@@ -309,6 +325,19 @@ Error assembleToStream(const ExegesisTarget &ET,
     Properties.resetTracksLiveness();
 
   Fill(Sink);
+
+  // Remote execution: read the cycle counter again before every return.
+  if (RemoteResultsAddress) {
+    const std::vector<MCInst> EndRead =
+        ET.readRemoteCycleCounter(*RemoteResultsAddress + 8, /*Start=*/false);
+    for (MachineBasicBlock &MBB : MF) {
+      MachineBasicBlock::iterator Term = MBB.getFirstTerminator();
+      if (Term == MBB.end() || !Term->isReturn())
+        continue;
+      for (const MCInst &Inst : EndRead)
+        insertMCInst(MBB, Term, *Sink.MCII, Inst, DebugLoc());
+    }
+  }
 
   // prologue/epilogue pass needs the reserved registers to be frozen, this
   // is usually done by the SelectionDAGISel pass.
