@@ -29,6 +29,9 @@ class RSPError(Exception):
 class RSPClient:
     def __init__(self, host, port, verbose=False):
         self.sock = socket.create_connection((host, port), timeout=10)
+        # Requests are small and strictly request/response: without this,
+        # Nagle's algorithm and delayed ACKs add ~40 ms to many packets.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.verbose = verbose
         self.buf = b""
         self.packet_size = 4096
@@ -202,19 +205,24 @@ class RSPClient:
             raise RSPError(f"read of register {name} failed: {reply}")
         return int.from_bytes(bytes.fromhex(reply), "little")
 
+    def _bp_size(self):
+        # The breakpoint "kind" is the instruction size: the return pad is a
+        # 16-bit Thumb "b ." on M-profile (recognized by its xPSR register).
+        return 2 if "xpsr" in self.reg_numbers else 4
+
     def insert_breakpoint(self, addr):
         # Prefer a hardware breakpoint: it works for code in any memory and
         # does not rewrite the return pad. Fall back to a software one.
         self.bp_kind = None
         for kind in ("1", "0"):
-            if self.command(f"Z{kind},{addr:x},4") == "OK":
+            if self.command(f"Z{kind},{addr:x},{self._bp_size()}") == "OK":
                 self.bp_kind = kind
                 return
         raise RSPError(f"cannot set a breakpoint at 0x{addr:x}")
 
     def remove_breakpoint(self, addr):
         if self.bp_kind is not None:
-            self.command(f"z{self.bp_kind},{addr:x},4")
+            self.command(f"z{self.bp_kind},{addr:x},{self._bp_size()}")
             self.bp_kind = None
 
     def cont(self, timeout_s):

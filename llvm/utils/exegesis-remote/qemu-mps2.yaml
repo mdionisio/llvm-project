@@ -1,0 +1,35 @@
+# Remote target description for QEMU `-M mps2-an500` (Cortex-M7) and
+# `-M mps2-an386` (Cortex-M4): code in SSRAM1 (0x0, 4 MiB), data in SSRAM2/3
+# (0x20000000, 4 MiB). Start QEMU halted with its gdbstub:
+#   qemu-system-arm -M mps2-an500 -nographic -monitor none -serial none \
+#     -icount shift=0 -S -gdb tcp::1240
+#
+# QEMU implements neither DWT CYCCNT (it reads as zero) nor debugger writes to
+# the System Control Space, so this description measures with SysTick,
+# enabled by the generated code. SysTick counts the 25 MHz system clock of
+# the board: with -icount shift=0 (one instruction per ns) each count is 40
+# instructions, hence the scale.
+version: 1
+code:    { base: 0x00100000, size: 0x100000 }
+scratch: { base: 0x20000000, size: 0x10000 }
+stack:   { top:  0x20100000 }
+results: 0x20010000
+timeout_ms: 2000
+init:
+  # A HardFault handler that spins ("b ."), so that a faulting snippet times
+  # out instead of locking up the core (QEMU then aborts).
+  - write32: [0x00000400, 0xE7FEE7FE]
+  - write32: [0x00000008, 0x00000401]   # NMI
+  - write32: [0x0000000C, 0x00000401]   # HardFault
+recover:
+  # After a fault or a timeout the core sits in the HardFault handler, where
+  # the next fault would lock it up: reset it (RAM keeps its contents).
+  - monitor: "system_reset"
+counter:
+  address: 0xE000E018                   # SYST_CVR
+  width: 24
+  down: true
+  scale: 40
+  setup:
+    - write32: [0xE000E014, 0x00FFFFFF] # SYST_RVR
+    - write32: [0xE000E010, 0x00000005] # SYST_CSR: ENABLE, CLKSOURCE=core
