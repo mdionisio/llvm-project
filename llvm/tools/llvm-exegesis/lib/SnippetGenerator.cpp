@@ -269,8 +269,11 @@ static Error randomizeMCOperand(const LLVMState &State,
                                 MCOperand &AssignedValue,
                                 const BitVector &ForbiddenRegs) {
   const Operand &Op = Instr.getPrimaryOperand(Var);
-  if (Op.getExplicitOperandInfo().OperandType >=
-      MCOI::OperandType::OPERAND_FIRST_TARGET)
+  // Predicates and optional definitions (e.g. the condition code and the
+  // flag-setting operand of ARM) only have a target-specific meaning.
+  const MCOperandInfo &OpInfo = Op.getExplicitOperandInfo();
+  if (OpInfo.OperandType >= MCOI::OperandType::OPERAND_FIRST_TARGET ||
+      OpInfo.isPredicate() || OpInfo.isOptionalDef())
     return State.getExegesisTarget().randomizeTargetMCOperand(
         Instr, Var, AssignedValue, ForbiddenRegs);
   switch (Op.getExplicitOperandInfo().OperandType) {
