@@ -43,6 +43,13 @@ struct YamlInitStep {
   std::optional<std::string> Monitor;
   std::vector<yaml::Hex64> Write32;
 };
+struct YamlCounter {
+  yaml::Hex64 Address = 0;
+  unsigned Width = 32;
+  bool Down = false;
+  uint64_t Scale = 1;
+  std::vector<YamlInitStep> Setup;
+};
 struct YamlDescription {
   unsigned Version = 0;
   YamlRegion Code;
@@ -51,6 +58,8 @@ struct YamlDescription {
   yaml::Hex64 Results = 0;
   unsigned TimeoutMs = 2000;
   std::vector<YamlInitStep> Init;
+  std::vector<YamlInitStep> Recover;
+  std::optional<YamlCounter> Counter;
 };
 } // namespace
 } // namespace exegesis
@@ -85,6 +94,25 @@ template <> struct MappingTraits<exegesis::YamlInitStep> {
     return "";
   }
 };
+template <> struct MappingTraits<exegesis::YamlCounter> {
+  static void mapping(IO &Io, exegesis::YamlCounter &C) {
+    Io.mapRequired("address", C.Address);
+    Io.mapOptional("width", C.Width, 32u);
+    Io.mapOptional("down", C.Down, false);
+    Io.mapOptional("scale", C.Scale, uint64_t(1));
+    Io.mapOptional("setup", C.Setup);
+  }
+  static std::string validate(IO &, exegesis::YamlCounter &C) {
+    if (C.Width == 0 || C.Width > 32)
+      return "the counter 'width' must be between 1 and 32";
+    if (C.Scale == 0)
+      return "the counter 'scale' must not be 0";
+    for (const exegesis::YamlInitStep &S : C.Setup)
+      if (S.Monitor)
+        return "the counter 'setup' only takes 'write32' steps";
+    return "";
+  }
+};
 template <> struct MappingTraits<exegesis::YamlDescription> {
   static void mapping(IO &Io, exegesis::YamlDescription &D) {
     Io.mapRequired("version", D.Version);
@@ -94,6 +122,8 @@ template <> struct MappingTraits<exegesis::YamlDescription> {
     Io.mapRequired("results", D.Results);
     Io.mapOptional("timeout_ms", D.TimeoutMs, 2000u);
     Io.mapOptional("init", D.Init);
+    Io.mapOptional("recover", D.Recover);
+    Io.mapOptional("counter", D.Counter);
   }
 };
 } // namespace yaml
@@ -126,12 +156,25 @@ RemoteTargetDescription::parse(StringRef Yaml) {
   D.StackTop = YD.Stack.Top;
   D.Results = YD.Results;
   D.TimeoutMs = YD.TimeoutMs;
-  for (const YamlInitStep &S : YD.Init) {
-    InitStep Step;
-    Step.Monitor = S.Monitor;
-    for (yaml::Hex64 V : S.Write32)
-      Step.Write32.push_back(V);
-    D.Init.push_back(std::move(Step));
+  for (auto [From, To] :
+       {std::pair{&YD.Init, &D.Init}, std::pair{&YD.Recover, &D.Recover}}) {
+    for (const YamlInitStep &S : *From) {
+      InitStep Step;
+      Step.Monitor = S.Monitor;
+      for (yaml::Hex64 V : S.Write32)
+        Step.Write32.push_back(V);
+      To->push_back(std::move(Step));
+    }
+  }
+  if (YD.Counter) {
+    RemoteTargetDescription::MemoryCounter C;
+    C.Address = YD.Counter->Address;
+    C.Width = YD.Counter->Width;
+    C.CountsDown = YD.Counter->Down;
+    C.Scale = YD.Counter->Scale;
+    for (const YamlInitStep &S : YD.Counter->Setup)
+      C.Setup.emplace_back(S.Write32[0], static_cast<uint32_t>(S.Write32[1]));
+    D.Counter = std::move(C);
   }
   if (Error E = D.validate())
     return std::move(E);
@@ -371,8 +414,9 @@ RemoteSession::createOffline(StringRef DescriptionPath,
       new RemoteSession(std::move(*Desc), nullptr, ET));
 }
 
-Error RemoteSession::initialize() {
-  for (const RemoteTargetDescription::InitStep &Step : Desc.Init) {
+Error RemoteSession::runSteps(
+    ArrayRef<RemoteTargetDescription::InitStep> Steps) const {
+  for (const RemoteTargetDescription::InitStep &Step : Steps) {
     if (Step.Monitor) {
       auto Out = Helper->command(*Step.Monitor);
       if (!Out)
@@ -384,6 +428,12 @@ Error RemoteSession::initialize() {
     if (Error E = Helper->writeMemory(Step.Write32[0], Value))
       return E;
   }
+  return Error::success();
+}
+
+Error RemoteSession::initialize() {
+  if (Error E = runSteps(Desc.Init))
+    return E;
   if (Error E = Helper->writeMemory(Desc.Scratch.Base,
                                     std::vector<uint8_t>(Desc.Scratch.Size, 0)))
     return E;
@@ -429,18 +479,31 @@ Expected<int64_t> RemoteSession::runOnce(const object::ObjectFile &Obj) const {
   // more than the run itself.
 
   const ExegesisTarget::RemoteABI ABI = *ET.getRemoteABI();
+  std::vector<std::pair<std::string, uint64_t>> Registers = {
+      {ABI.ArgumentRegister, S.Base},
+      {ABI.StackPointer, Desc.StackTop},
+      {ABI.LinkRegister, Desc.returnPadAddress() | ABI.LinkRegisterTag}};
+  for (const auto &[Name, Value] : ABI.ExtraRegisters)
+    Registers.emplace_back(Name, Value);
   auto Halted = Helper->run(Desc.functionAddress(), Desc.returnPadAddress(),
-                            Desc.TimeoutMs,
-                            {{ABI.ArgumentRegister, S.Base},
-                             {ABI.StackPointer, Desc.StackTop},
-                             {ABI.LinkRegister, Desc.returnPadAddress()}});
-  if (!Halted)
-    return Halted.takeError();
-  if (*Halted != Desc.returnPadAddress())
-    return make_error<SnippetRemoteFailure>(
-        "the snippet stopped at " + hex(*Halted) +
-        " instead of returning to the return pad (" +
-        hex(Desc.returnPadAddress()) + "): it probably faulted");
+                            Desc.TimeoutMs, Registers);
+  Error Failed = [&]() -> Error {
+    if (!Halted)
+      return Halted.takeError();
+    if (*Halted != Desc.returnPadAddress())
+      return make_error<SnippetRemoteFailure>(
+          "the snippet stopped at " + hex(*Halted) +
+          " instead of returning to the return pad (" +
+          hex(Desc.returnPadAddress()) + "): it probably faulted");
+    return Error::success();
+  }();
+  if (Failed) {
+    // Bring the core back to a known state for the next run.
+    if (Failed.isA<SnippetRemoteFailure>())
+      if (Error E = runSteps(Desc.Recover))
+        return joinErrors(std::move(Failed), std::move(E));
+    return std::move(Failed);
+  }
 
   auto Results =
       Helper->readMemory(Desc.Results, RemoteTargetDescription::kResultsSize);
@@ -448,10 +511,14 @@ Expected<int64_t> RemoteSession::runOnce(const object::ObjectFile &Obj) const {
     return Results.takeError();
   const uint64_t Start = support::endian::read64le(Results->data());
   const uint64_t End = support::endian::read64le(Results->data() + 8);
-  const uint64_t Mask = ABI.CycleCounterWidth >= 64
-                            ? ~uint64_t(0)
-                            : (uint64_t(1) << ABI.CycleCounterWidth) - 1;
-  return static_cast<int64_t>((End - Start) & Mask);
+  const unsigned Width =
+      Desc.Counter ? Desc.Counter->Width : ABI.CycleCounterWidth;
+  const uint64_t Mask = Width >= 64 ? ~uint64_t(0) : (uint64_t(1) << Width) - 1;
+  if (!Desc.Counter)
+    return static_cast<int64_t>((End - Start) & Mask);
+  const uint64_t Elapsed =
+      (Desc.Counter->CountsDown ? Start - End : End - Start) & Mask;
+  return static_cast<int64_t>(Elapsed * Desc.Counter->Scale);
 }
 
 } // namespace exegesis

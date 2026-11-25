@@ -1,3 +1,5 @@
+# REQUIRES: aarch64-registered-target
+
 # Check the counter reads that the remote execution mode adds around the
 # snippet: setup and first read before the register setup, second read before
 # the return. No helper is needed to assemble.

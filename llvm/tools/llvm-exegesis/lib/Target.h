@@ -212,6 +212,13 @@ public:
     unsigned CycleCounterWidth;
     // Encoding of an instruction that branches to itself: the return pad.
     std::vector<uint8_t> ReturnPad;
+    // Bits ORed into the return pad address written to the link register,
+    // e.g. 1 so that `bx lr` returns in Thumb state. The debugger breakpoint
+    // stays on the return pad address itself.
+    uint64_t LinkRegisterTag = 0;
+    // Other registers to set before each run, as name and value, e.g. the
+    // Thumb bit of the M-profile xPSR.
+    std::vector<std::pair<const char *, uint64_t>> ExtraRegisters = {};
   };
 
   // Returns std::nullopt if the target does not support remote execution.
@@ -223,6 +230,17 @@ public:
   // but the stack pointer and the argument register.
   virtual std::vector<MCInst> readRemoteCycleCounter(uint64_t Address,
                                                      bool Start) const {
+    return {};
+  }
+
+  // Like readRemoteCycleCounter, for a 32-bit memory-mapped counter at
+  // CounterAddress given by the remote target description (e.g. a timer of
+  // the SoC). The value goes in the low 4 bytes at Address and the high 4
+  // bytes are zeroed. When Start is true, the 32-bit (address, value) stores
+  // in Setup run first, e.g. to enable the counter.
+  virtual std::vector<MCInst>
+  readRemoteMemoryCounter(uint64_t Address, bool Start, uint64_t CounterAddress,
+                          ArrayRef<std::pair<uint64_t, uint32_t>> Setup) const {
     return {};
   }
 

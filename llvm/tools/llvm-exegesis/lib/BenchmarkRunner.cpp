@@ -715,9 +715,7 @@ Expected<SmallString<0>> BenchmarkRunner::assembleSnippet(
           Repetitor.Repeat(Instructions, MinInstructions, LoopBodySize,
                            GenerateMemoryInstructions),
           OS, BC.Key, GenerateMemoryInstructions,
-          RemoteSess
-              ? std::optional<uint64_t>(RemoteSess->getDescription().Results)
-              : std::nullopt)) {
+          RemoteSess ? &RemoteSess->getDescription() : nullptr)) {
     return std::move(E);
   }
   return Buffer;

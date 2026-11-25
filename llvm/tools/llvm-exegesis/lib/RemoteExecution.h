@@ -57,6 +57,18 @@ struct RemoteTargetDescription {
     std::vector<uint64_t> Write32; // {address, value}
   };
 
+  /// A memory-mapped counter that replaces the default cycle counter of the
+  /// target, e.g. a timer of the SoC or SysTick.
+  struct MemoryCounter {
+    uint64_t Address = 0;
+    unsigned Width = 32;     // bits that count, for the wrap-around
+    bool CountsDown = false; // the elapsed count is start - end
+    uint64_t Scale = 1;      // core cycles per count
+    /// 32-bit (address, value) stores done by the generated code before the
+    /// first read of each run, e.g. to enable the counter.
+    std::vector<std::pair<uint64_t, uint32_t>> Setup;
+  };
+
   unsigned Version = 0;
   Region Code;
   Region Scratch;
@@ -64,6 +76,11 @@ struct RemoteTargetDescription {
   uint64_t Results = 0;
   unsigned TimeoutMs = 2000;
   std::vector<InitStep> Init;
+  /// Steps run after a failed run (fault or timeout), e.g. a reset of the
+  /// core: an M-profile core left in a fault handler locks up on the next
+  /// fault.
+  std::vector<InitStep> Recover;
+  std::optional<MemoryCounter> Counter;
 
   /// Size of the results area: start and end counter values, 8 bytes each.
   static constexpr uint64_t kResultsSize = 16;
@@ -130,6 +147,7 @@ private:
                 std::unique_ptr<RemoteHelper> Helper, const ExegesisTarget &ET)
       : Desc(std::move(Desc)), Helper(std::move(Helper)), ET(ET) {}
   Error initialize();
+  Error runSteps(ArrayRef<RemoteTargetDescription::InitStep> Steps) const;
 
   RemoteTargetDescription Desc;
   std::unique_ptr<RemoteHelper> Helper;

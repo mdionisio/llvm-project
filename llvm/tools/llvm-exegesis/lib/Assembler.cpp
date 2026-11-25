@@ -8,6 +8,7 @@
 
 #include "Assembler.h"
 
+#include "RemoteExecution.h"
 #include "SnippetRepetitor.h"
 #include "SubprocessMemory.h"
 #include "Target.h"
@@ -263,7 +264,7 @@ Error assembleToStream(const ExegesisTarget &ET,
                        ArrayRef<MCRegister> LiveIns, const FillFunction &Fill,
                        raw_pwrite_stream &AsmStream, const BenchmarkKey &Key,
                        bool GenerateMemoryInstructions,
-                       std::optional<uint64_t> RemoteResultsAddress) {
+                       const RemoteTargetDescription *Remote) {
   auto Context = std::make_unique<LLVMContext>();
   std::unique_ptr<Module> Module = createModule(Context, *TM);
   auto MMIWP = std::make_unique<MachineModuleInfoWrapperPass>(TM.get());
@@ -308,12 +309,35 @@ Error assembleToStream(const ExegesisTarget &ET,
       Entry.MBB->addLiveIn(Reg);
   }
 
+  // Remote execution: the counter reads store to the results area, from the
+  // memory-mapped counter of the description if any, else from the default
+  // cycle counter of the target.
+  auto ReadRemoteCounter = [&](bool Start) -> Expected<std::vector<MCInst>> {
+    const uint64_t Slot = Remote->Results + (Start ? 0 : 8);
+    std::vector<MCInst> Insts =
+        Remote->Counter
+            ? ET.readRemoteMemoryCounter(Slot, Start, Remote->Counter->Address,
+                                         Remote->Counter->Setup)
+            : ET.readRemoteCycleCounter(Slot, Start);
+    if (Insts.empty())
+      return make_error<Failure>(
+          Remote->Counter
+              ? "the target cannot read a memory-mapped counter in the "
+                "remote execution mode"
+              : "the target has no default cycle counter for the remote "
+                "execution mode: describe one with 'counter:'");
+    return Insts;
+  };
+
   // Remote execution: read the cycle counter before setting up the registers,
   // so that its temporaries do not clobber the initial values. The setup cost
   // is constant and cancels out in the middle-half repetition modes.
-  if (RemoteResultsAddress)
-    Entry.addInstructions(
-        ET.readRemoteCycleCounter(*RemoteResultsAddress, /*Start=*/true));
+  if (Remote) {
+    auto StartRead = ReadRemoteCounter(/*Start=*/true);
+    if (!StartRead)
+      return StartRead.takeError();
+    Entry.addInstructions(*StartRead);
+  }
 
   const bool IsSnippetSetupComplete = generateSnippetSetupCode(
       ET, &TM->getMCSubtargetInfo(), Entry, Key, GenerateMemoryInstructions);
@@ -327,14 +351,15 @@ Error assembleToStream(const ExegesisTarget &ET,
   Fill(Sink);
 
   // Remote execution: read the cycle counter again before every return.
-  if (RemoteResultsAddress) {
-    const std::vector<MCInst> EndRead =
-        ET.readRemoteCycleCounter(*RemoteResultsAddress + 8, /*Start=*/false);
+  if (Remote) {
+    auto EndRead = ReadRemoteCounter(/*Start=*/false);
+    if (!EndRead)
+      return EndRead.takeError();
     for (MachineBasicBlock &MBB : MF) {
       MachineBasicBlock::iterator Term = MBB.getFirstTerminator();
       if (Term == MBB.end() || !Term->isReturn())
         continue;
-      for (const MCInst &Inst : EndRead)
+      for (const MCInst &Inst : *EndRead)
         insertMCInst(MBB, Term, *Sink.MCII, Inst, DebugLoc());
     }
   }

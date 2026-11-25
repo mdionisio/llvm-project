@@ -36,6 +36,8 @@
 namespace llvm {
 namespace exegesis {
 
+struct RemoteTargetDescription;
+
 class ExegesisTarget;
 
 // Gather the set of reserved registers (depends on function's calling
@@ -94,7 +96,7 @@ Error assembleToStream(const ExegesisTarget &ET,
                        ArrayRef<MCRegister> LiveIns, const FillFunction &Fill,
                        raw_pwrite_stream &AsmStreamm, const BenchmarkKey &Key,
                        bool GenerateMemoryInstructions,
-                       std::optional<uint64_t> RemoteResultsAddress = {});
+                       const RemoteTargetDescription *Remote = nullptr);
 
 // Creates an ObjectFile in the format understood by the host.
 // Note: the resulting object keeps a copy of Buffer so it can be discarded once

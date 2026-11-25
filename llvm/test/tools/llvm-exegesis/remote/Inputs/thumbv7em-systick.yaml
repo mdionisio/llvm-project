@@ -1,0 +1,14 @@
+# SysTick as a 24-bit down counter, 40 core cycles per count.
+version: 1
+code:    { base: 0x00100000, size: 0x10000 }
+scratch: { base: 0x20000000, size: 0x10000 }
+stack:   { top:  0x20100000 }
+results: 0x20010000
+counter:
+  address: 0xE000E018
+  width: 24
+  down: true
+  scale: 40
+  setup:
+    - write32: [0xE000E014, 0x00FFFFFF]
+    - write32: [0xE000E010, 0x5]

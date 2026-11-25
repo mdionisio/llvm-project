@@ -1,0 +1,6 @@
+version: 1
+code:    { base: 0x00100000, size: 0x10000 }
+scratch: { base: 0x20000000, size: 0x10000 }
+stack:   { top:  0x20100000 }
+results: 0x20010000
+counter: { address: 0xE000E018, width: 33 }

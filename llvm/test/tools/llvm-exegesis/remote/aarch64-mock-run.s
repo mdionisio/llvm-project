@@ -1,3 +1,5 @@
+# REQUIRES: aarch64-registered-target
+
 # Check the remote execution mode end to end against the mock helper. The mock
 # reports one cycle per instruction of the loaded function, so the
 # middle-half repetition mode must measure exactly one cycle per instruction.

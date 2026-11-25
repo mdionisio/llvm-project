@@ -4,8 +4,10 @@
 It executes nothing. Memory is a sparse byte map. On `run` it fills the
 results area with start=1000 and end=1000+N, where N is the number of
 instructions (bytes / --insn-size) written at --function since the
-previous run, or --fixed-cycles when given. Every request is appended to
---log so a test can FileCheck the exchanged protocol.
+previous run, or --fixed-cycles when given. --start, --down and --width
+emulate other counters: a down counter stores end=start-N, and both values
+are truncated to --width bits. Every request is appended to --log so a test
+can FileCheck the exchanged protocol.
 """
 
 import argparse
@@ -18,6 +20,9 @@ def main():
     ap.add_argument("--function", type=lambda s: int(s, 0), required=True)
     ap.add_argument("--insn-size", type=int, default=4)
     ap.add_argument("--fixed-cycles", type=int)
+    ap.add_argument("--start", type=lambda s: int(s, 0), default=1000)
+    ap.add_argument("--down", action="store_true")
+    ap.add_argument("--width", type=int, default=64)
     ap.add_argument("--halt-pc", type=lambda s: int(s, 0),
                     help="report this PC instead of the stop address")
     ap.add_argument("--fail-on", help="answer 'err' to this request kind")
@@ -66,7 +71,9 @@ def main():
             else:
                 cycles = code_bytes // opts.insn_size
             code_bytes = 0
-            for slot, value in enumerate((1000, 1000 + cycles)):
+            end = opts.start - cycles if opts.down else opts.start + cycles
+            mask = (1 << opts.width) - 1
+            for slot, value in enumerate((opts.start & mask, end & mask)):
                 for i, b in enumerate(value.to_bytes(8, "little")):
                     mem[opts.results + 8 * slot + i] = b
             pc = opts.halt_pc if opts.halt_pc is not None else stop

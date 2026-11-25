@@ -1,3 +1,5 @@
+# REQUIRES: aarch64-registered-target
+
 # Errors of the remote execution mode.
 
 # RUN: not llvm-exegesis --mtriple=aarch64 --mcpu=cortex-a53 --mode=latency \
@@ -40,6 +42,29 @@
 # INIT-NEXT: cmd reset halt
 # INIT-NEXT: write 0xe000edfc <4 bytes>
 # INIT-NEXT: write 0x40100000 <256 bytes>
+
+# After a failed run, the recover steps reach the helper.
+# RUN: rm -f %t.recover.log
+# RUN: llvm-exegesis --mtriple=aarch64 --mcpu=cortex-a53 --mode=latency \
+# RUN:   --execution-mode=remote --remote-target=%S/Inputs/recover.yaml \
+# RUN:   --remote-helper='%exegesis_mock_helper --function 0x40081000 --results 0x400ff000 --halt-pc 0x1234 --log %t.recover.log' \
+# RUN:   --snippets-file=%s | FileCheck %s --check-prefix=FAULT
+# RUN: FileCheck %s --check-prefix=RECOVER < %t.recover.log
+# RECOVER:      run 0x40081000 0x40080000
+# RECOVER-NEXT: cmd system_reset
+
+# A memory-mapped counter needs target support, which AArch64 does not have.
+# RUN: not llvm-exegesis --mtriple=aarch64 --mcpu=cortex-a53 --mode=latency \
+# RUN:   --execution-mode=remote --remote-target=%S/Inputs/thumbv7em-systick.yaml \
+# RUN:   --remote-helper=unused --benchmark-phase=assemble-measured-code \
+# RUN:   --snippets-file=%s 2>&1 | FileCheck %s --check-prefix=MMIO
+# MMIO: the target cannot read a memory-mapped counter in the remote execution mode
+
+# RUN: not llvm-exegesis --mtriple=aarch64 --mcpu=cortex-a53 --mode=latency \
+# RUN:   --execution-mode=remote --remote-target=%S/Inputs/bad-counter.yaml \
+# RUN:   --remote-helper=unused --snippets-file=%s 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=WIDTH
+# WIDTH: the counter 'width' must be between 1 and 32
 
 # LLVM-EXEGESIS-DEFREG X1 0
 # LLVM-EXEGESIS-DEFREG X2 0
